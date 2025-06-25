@@ -1,29 +1,110 @@
 # xQTLProcessing
 
 Theorized pipeline:
+1. Trim files:
+````
+#!/bin/bash
+
+DIR="/mnt/d/xQTL_2025_Data/23152-05-06162025_145113-457684232/BaseSpace_CLI_2025-06-16_17_37_50Z->
+# Iterate over all R1 fastq.gz files in the directory
+for R1 in "$DIR"/*_R1_001.fastq.gz; do
+    # Extract base filename without path and suffix
+    BASE=$(basename "$R1")
+    BASE=${BASE%%_R1_001.fastq.gz}
+
+    # Construct full paths to R1 and R2
+    R1_FILE="$DIR/${BASE}_R1_001.fastq.gz"
+    R2_FILE="$DIR/${BASE}_R2_001.fastq.gz"
+
+    # Check if both files exist
+    if [[ -f "$R1_FILE" && -f "$R2_FILE" ]]; then
+        echo "Trimming: $BASE"
+        trim_galore --paired --length 40 --max_n 1 -q 20 -j 8 -o "/mnt/d/xQTL_2025_Data/xQTL_Data>    else
+        echo "Missing file(s) for $BASE"
+    fi
+done
+````
 
 1. bwa-mem > generate bam files (include raw FASTQ for each of the pooled samples + pB DSPR pop) <<< make.bams.txt - ref >>>
 ````
-bwa mem -t 8 -M $ref raw/${R1} raw/${R2} | samtools view -bS - > $dir1/$shortname.temp.bam
-samtools sort $dir1/$shortname.temp.bam -o $dir1/$shortname.bam
-samtools index $dir1/$shortname.bam
+# Directory containing .gz files
+input_dir="/mnt/d/xQTL_2025_Data/xQTL_Data_Real_Samples"
+output_dir="$input_dir/bams"
+
+mkdir -p "$output_dir"
+
+# Reference genome
+reference_genome="/mnt/d/xQTL_2025_Data/ref/dm6.fa"
+
+# Number of threads for BWA
+threads=50
+
+# Iterate over all R1 files in the specified directory
+for file1 in "$input_dir"/*_R1_*_val_1.fq.gz; do
+    # Construct the expected R2 filename
+    file2="${file1/_R1_/_R2_}"
+    file2="${file2/_val_1/_val_2}"
+    echo "$file1"
+    echo "$file2"
+
+    # Check if the R2 file exists
+    if [ -f "$file2" ]; then
+        # Output filename
+        output_file1=$(basename "${file1%_R1_*.fq.gz}_temp_aligned.bam")
+        output_file2=$(basename "${file1%_R1_*.fq.gz}_aligned.bam")
+
+        bwa mem "$reference_genome" -M -t "$threads" -v 3 "$file1" "$file2" | samtools view -bS - > "$output_dir/$outpu>        samtools sort "$output_dir/$output_file1" -o "$output_dir/$output_file2"
+        samtools index "$output_dir/$output_file2"
+    else
+        echo "Corresponding R2 file for $file1 not found."
+    fi
+done
 ````
 
 2. bcftoolsmpileup > combined all of the pooled samples (control and treatment) as well as founder samples <<< call.SNPs.txt - ref >>>
 ````
-module load samtools/1.9
-module load bcftools/1.9
-ref="/share/adl/tdlong/DSPR/DNAseq/ref/dm6.fa"
+#!/bin/bash
+
+# Reference genome
+ref="/mnt/d/xQTL_2025_Data/Practice_data/ref/dm6.fa"
+
+# Chromosome list
 declare -a chrs=("chrX" "chr2L" "chr2R" "chr3L" "chr3R")
-mychr=${chrs[$SGE_TASK_ID - 1]}
-# files.txt is a list of bam files to combine
-# it should include all the pooled samples AND the founders as BAMs!
-bcftools mpileup -I -d 1000 -t $mychr -a "FORMAT/AD,FORMAT/DP" -f $ref -b helperfile/files.txt | bcftools call -mv -Ob > July24/calls.$mychr.bcf  
-# frequencies @ SNPs by sample
-bcftools query -e'GT ="./."'  -e'QUAL<60' -f'%CHROM %POS %REF %ALT [ %AD{0} %AD{1}] [%GT]\n' July24/calls.$mychr.bcf | grep -v '\.' | perl scripts/accuracy.freqtab.pl >July24/temp.$mychr.txt
-# counts @ SNPs by sample
-bcftools query -e'GT ="./."'  -e'QUAL<60' -f'%CHROM %POS %REF %ALT [ %AD{0} %AD{1}] [%GT]\n' July24/calls.$mychr.bcf | grep -v '\.' | perl scripts/accuracy.counttab.pl >July24/temp.count.$mychr.txt
-####
+
+# Directory with BAM files
+bam_dir="/mnt/d/xQTL_2025_Data/Practice_data/TrimOut/bwaAligned"
+
+# Output directory
+outdir="accuracyhap"
+mkdir -p "$outdir"
+
+# Collect all BAMs into a list
+bam_files=("$bam_dir"/*.bam)
+
+# Loop through each chromosome
+for mychr in "${chrs[@]}"; do
+    echo "Processing all BAMs for chromosome $mychr"
+
+    bcf_out="$outdir/combined.${mychr}.bcf"
+    echo "Writing BCF to $bcf_out"
+
+    # Run bcftools mpileup + call for all BAMs at once
+    bcftools mpileup -v 3 --threads 50 -I -d 1000 -r "$mychr" -a "FORMAT/AD,FORMAT/DP" -f "$ref" "${bam_files[@]}" |
+    bcftools call -mv -Ob -o "$bcf_out"
+
+    # Frequency table
+    bcftools query -e 'GT="./." || QUAL<20 || FORMAT/DP<20 || FORMAT/DP>200' \
+      -f '%CHROM %POS %REF %ALT [ %AD{0} %AD{1}] [%GT]\n' "$bcf_out" |
+    grep -v '\.' |
+    perl scripts/accuracy.freqtab.pl > "$outdir/combined.temp.${mychr}.txt"
+
+    # Count table
+    bcftools query -e 'GT="./." || QUAL<20 || FORMAT/DP<20 || FORMAT/DP>200' \
+      -f '%CHROM %POS %REF %ALT [ %AD{0} %AD{1}] [%GT]\n' "$bcf_out" |
+    grep -v '\.' |
+    perl scripts/accuracy.counttab.pl > "$outdir/combined.temp.count.${mychr}.txt"
+
+done
 
 ````
 
